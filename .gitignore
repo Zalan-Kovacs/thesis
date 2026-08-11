@@ -1,0 +1,32 @@
+# IDE & OS files
+.vscode/
+.idea/
+.DS_Store
+Thumbs.db
+
+# Environmental variables
+.env
+.env.*
+*.local
+
+# Python / Backend
+.venv/
+backend/.venv/
+backend/__pycache__/
+*.py[cod]
+*$py.class
+.pytest_cache/
+.ruff_cache/
+# ML model cache
+backend/models_cache/ 
+
+# Node / Frontend
+frontend/node_modules/
+frontend/dist/
+frontend/dist-ssr/
+npm-debug.log*
+
+# Docker / Infrastructure
+docker_data/
+opensearch_data/
+*.log
