@@ -1,12 +1,12 @@
-import time
 import random
+import time
 from datetime import datetime, timedelta
 
 # Parameters
 interval_in_seconds = 5  # Interval between log entries
 duration_in_minutes = 1  # Duration to run the script
 log_message = "Special log entry"  # Custom log message
-log_file_path = "../log-assistant/synth_logs.log"  # Path to the log file
+log_file_path = "../synth_logs.log"  # Path to the log file
 
 # Fake log messages
 fake_messages = [
