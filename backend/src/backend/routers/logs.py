@@ -119,3 +119,26 @@ def getAllLogs():
         return response
     except OpenSearchException as e:
         raise HTTPException(status_code=500, detail=str(e))
+
+@router.get("/search")
+def searchLogs(q: str = ""):
+    try:
+        query = {
+            "match_all": {}
+        } if not q else {
+            "multi_match": {
+                "query": q,
+                "fields": ["message", "service", "severity"]
+            }
+        }
+
+        response = client.search(
+            index="system-logs",
+            body={
+                "query": query,
+                "size": 50
+            }
+        )
+        return response
+    except OpenSearchException as e:
+        raise HTTPException(status_code=500, detail=str(e))
