@@ -2,7 +2,7 @@ import os
 from datetime import datetime
 from zoneinfo import ZoneInfo
 
-from fastapi import APIRouter, HTTPException
+from fastapi import APIRouter, HTTPException, UploadFile
 from opensearchpy import OpenSearch, OpenSearchException
 from pydantic import BaseModel
 
@@ -21,6 +21,11 @@ class LogEntry(BaseModel):
     source: str = "historic"
     scenarioTag: str | None = None
     formattedText: str | None = None
+
+@router.post("/preview")
+def previewFile(file: UploadFile):
+    firstLine = (file.file.readline()).decode("utf-8")
+    return {"First Line": firstLine}
 
 
 @router.get("/load", response_model=list[LogEntry])

@@ -1,4 +1,4 @@
-import { useState } from 'react';
+import { useState } from "react";
 
 interface LogHit {
   _source: {
@@ -10,7 +10,7 @@ interface LogHit {
 }
 
 export default function LogSearch() {
-  const [query, setQuery] = useState('');
+  const [query, setQuery] = useState("");
   const [logs, setLogs] = useState<LogHit[]>([]);
   const [loading, setLoading] = useState(false);
 
@@ -18,36 +18,37 @@ export default function LogSearch() {
     e.preventDefault();
     setLoading(true);
     try {
-      const res = await fetch(`/api/logs/search?q=${encodeURIComponent(query)}`);
+      const res = await fetch(
+        `/api/logs/search?q=${encodeURIComponent(query)}`,
+      );
       const data = await res.json();
       if (data.hits && data.hits.hits) {
         setLogs(data.hits.hits);
       }
     } catch (err) {
-      console.error("Hiba a keresés során:", err);
+      console.error("Error during search:", err);
     } finally {
       setLoading(false);
     }
   };
 
   return (
-    <div style={{ margin: '20px 0' }}>
+    <div style={{ margin: "20px 0" }}>
       <form onSubmit={handleSearch}>
         <input
           type="text"
           value={query}
           onChange={(e) => setQuery(e.target.value)}
           placeholder="Keresés a logokban..."
-          style={{ padding: '8px', width: '300px', marginRight: '8px' }}
         />
-        <button type="submit" style={{ padding: '8px 16px' }}>Keresés</button>
+        <button type="submit">Keresés</button>
       </form>
 
       {loading && <p>Keresés folyamatban...</p>}
 
-      <ul style={{ listStyle: 'none', padding: 0, marginTop: '16px' }}>
+      <ul>
         {logs.map((item, index) => (
-          <li key={index} style={{ padding: '6px 0', borderBottom: '1px solid #ddd' }}>
+          <li key={index}>
             <strong>[{item._source.severity}]</strong> {item._source.message}
           </li>
         ))}
