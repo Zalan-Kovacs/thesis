@@ -6,6 +6,7 @@ import "./App.css";
 
 function App() {
   const [health, setHealth] = useState(null);
+  const [activeView, setActiveView] = useState<string>("load");
 
   useEffect(() => {
     fetch("/api/health")
@@ -15,19 +16,40 @@ function App() {
 
   return (
     <>
+      <div style={{ marginBottom: "20px" }}>
+        <label htmlFor="view-select" style={{ marginRight: "10px" }}>
+          Nézet kiválasztása:
+        </label>
+        <select
+          id="view-select"
+          value={activeView}
+          onChange={(e) => setActiveView(e.target.value)}
+        >
+          <option value="health">Health</option>
+          <option value="load">LogLoad</option>
+          <option value="search">LogSearch</option>
+        </select>
+      </div>
       <section id="center"></section>
-      <section>
-        <Health health={health} />
-      </section>
+      {activeView === "health" && (
+        <section>
+          <Health health={health} />
+        </section>
+      )}
 
-      <section>
-        <h2>LogLoad</h2>
-        <LogLoad />
-      </section>
-      <section>
-        <h2>LogSearch</h2>
-        <LogSearch />
-      </section>
+      {activeView === "load" && (
+        <section>
+          <h2>LogLoad</h2>
+          <LogLoad />
+        </section>
+      )}
+
+      {activeView === "search" && (
+        <section>
+          <h2>LogSearch</h2>
+          <LogSearch />
+        </section>
+      )}
     </>
   );
 }

@@ -10,21 +10,31 @@ interface LogHit {
 }
 
 export default function LogSearch() {
-  const [query, setQuery] = useState("");
-  const [logs, setLogs] = useState<LogHit[]>([]);
   const [loading, setLoading] = useState(false);
+  const [q, setQ] = useState<string>("");
+  const [service, setService] = useState<string>("");
+  const [severity, setSeverity] = useState<string>("");
+  const [dateFrom, setDateFrom] = useState<string>("");
+  const [dateTo, setDateTo] = useState<string>("");
+  const [logs, setLogs] = useState<
+    Array<{ _id: string; _source: LogHit["_source"] }>
+  >([]);
 
   const handleSearch = async (e: React.FormEvent) => {
     e.preventDefault();
     setLoading(true);
+
+    const params = new URLSearchParams();
+    if (q != "") params.append("q", q.trim());
+    if (service != "") params.append("service", service.trim());
+    if (severity != "") params.append("severity", severity.trim());
+    if (dateFrom != "") params.append("dateFrom", dateFrom.trim());
+    if (dateTo != "") params.append("dateTo", dateTo.trim());
+
     try {
-      const res = await fetch(
-        `/api/logs/search?q=${encodeURIComponent(query)}`,
-      );
+      const res = await fetch(`/api/logs/search?${params.toString()}`);
       const data = await res.json();
-      if (data.hits && data.hits.hits) {
-        setLogs(data.hits.hits);
-      }
+      if (Array.isArray(data)) setLogs(data);
     } catch (err) {
       console.error("Error during search:", err);
     } finally {
@@ -37,19 +47,54 @@ export default function LogSearch() {
       <form onSubmit={handleSearch}>
         <input
           type="text"
-          value={query}
-          onChange={(e) => setQuery(e.target.value)}
-          placeholder="Keresés a logokban..."
+          value={q}
+          onChange={(e) => setQ(e.target.value)}
+          placeholder="Search in logs"
         />
-        <button type="submit">Keresés</button>
+        <input
+          type="text"
+          value={service}
+          onChange={(e) => setService(e.target.value)}
+          placeholder="Service"
+        />
+        <label htmlFor="sev">Severity</label>
+        <select
+          name="severity"
+          id="sev"
+          value={severity}
+          onChange={(e) => setSeverity(e.target.value)}
+        >
+          <option value="">All severities</option>
+          <option value="info">[INFO]</option>
+          <option value="warning">[WARNING]</option>
+          <option value="error">[ERROR]</option>
+        </select>
+        <label htmlFor="dateFrom">From:</label>
+        <input
+          id="dateFrom"
+          type="datetime-local"
+          value={dateFrom}
+          onChange={(e) => setDateFrom(e.target.value)}
+        />
+        <label htmlFor="dateTo">To:</label>
+        <input
+          id="dateTo"
+          type="datetime-local"
+          value={dateTo}
+          onChange={(e) => setDateTo(e.target.value)}
+        />
+        <button type="submit">Search</button>
       </form>
 
-      {loading && <p>Keresés folyamatban...</p>}
+      {loading && <p>Searching...</p>}
 
       <ul>
         {logs.map((item, index) => (
-          <li key={index}>
-            <strong>[{item._source.severity}]</strong> {item._source.message}
+          <li key={item._id}>
+            <small>{item._source.timeStamp}</small> |
+            <strong> [{item._source.service}]</strong>
+            <span> [{item._source.severity}] </span>
+            {item._source.message}
           </li>
         ))}
       </ul>
