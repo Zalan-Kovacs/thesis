@@ -1,10 +1,13 @@
-import os, json
+import json
+import os
 from datetime import datetime
 from zoneinfo import ZoneInfo
 
-from fastapi import APIRouter, HTTPException, UploadFile, Form, File
+from fastapi import APIRouter, File, Form, HTTPException, UploadFile
 from opensearchpy import OpenSearch, OpenSearchException, helpers
 from pydantic import BaseModel
+
+from ..embeddings import get_embeddings_batch
 
 router = APIRouter(
     prefix="/logs",
@@ -21,6 +24,7 @@ class LogEntry(BaseModel):
     source: str = "historic"
     scenarioTag: str | None = None
     formattedText: str | None = None
+    message_vector: list[float] | None = None
 
 @router.post("/preview")
 def previewFile(file: UploadFile):
@@ -72,6 +76,11 @@ def ingestFile(
                 "formattedText": f"[{service}] [{svr_val}] {message_val}"
             }
         })
+    if lines:
+        messages = [item["_source"]["message"] for item in lines]
+        vectors = get_embeddings_batch(messages)
+        for item, vec, in zip(lines, vectors):
+            item["_source"]["message_vector"] = vec
 
     success_count, errors = helpers.bulk(client, lines, stats_only=True)
 
@@ -149,17 +158,20 @@ def indexLogs():
     logs = loadLogs()
     if not logs:
         raise HTTPException(status_code=400, detail="No logs To Index")
-    errors = []
-    for log in logs:
-        try:
-            client.index(
-                index = 'system-logs',
-                body = log.model_dump(mode = "json")
-            )
-        except OpenSearchException as e:
-            errors.append(str(e))
+    
+    messages = [log.message for log in logs]
+    vectors = get_embeddings_batch(messages)
 
-    return {"status": 200, "count": len(logs)-len(errors), "errors_count": len(errors), "errors": errors}
+    actions = []
+    for log, vec in zip(logs, vectors):
+        log.message_vector = vec
+        actions.append({
+            "_index": "system-logs",
+            "_source": log.model_dump(mode="json")
+        })
+
+    success_count, errors = helpers.bulk(client, actions, stats_only=True)
+    return {"status": 200, "indexed_count": success_count, "errors_count": errors}
 
 
 @router.get("/all")
@@ -193,9 +205,9 @@ def searchLogs(
     if q and q != "":
         mustClauses.append({"match": {"message": q}})
     if service and service != "":
-        filterClauses.append({"term": {"service.keyword": service}})
+        filterClauses.append({"term": {"service": service}})
     if severity and severity != "":
-        filterClauses.append({"term": {"severity.keyword": severity.upper()}})
+        filterClauses.append({"term": {"severity": severity.upper()}})
     if dateFrom and dateFrom != "":
         timeRange["gte"] = dateFrom
     if dateTo and dateTo != "":
