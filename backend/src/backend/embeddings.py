@@ -4,8 +4,8 @@ model = SentenceTransformer("all-MiniLM-L6-v2")
 
 def get_embedding(text: str) -> list[float]:
     """From text generates a 384 dimenson vector."""
-    return model.encode(text).tolist()
+    return model.encode(text, normalize_embeddings=True).tolist()
 
-def get_embeddings_batch(texts: list[str]) -> list[float]:
+def get_embeddings_batch(texts: list[str]) -> list[list[float]]:
     """For more text at the same time."""
-    return model.encode(texts, batch_size=64, show_progress_bar=False).tolist()
+    return model.encode(texts, batch_size=64, show_progress_bar=False, normalize_embeddings=True).tolist()

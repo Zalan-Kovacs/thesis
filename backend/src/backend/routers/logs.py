@@ -7,7 +7,7 @@ from fastapi import APIRouter, File, Form, HTTPException, UploadFile
 from opensearchpy import OpenSearch, OpenSearchException, helpers
 from pydantic import BaseModel
 
-from ..embeddings import get_embeddings_batch
+from ..embeddings import get_embedding, get_embeddings_batch 
 
 router = APIRouter(
     prefix="/logs",
@@ -24,7 +24,7 @@ class LogEntry(BaseModel):
     source: str = "historic"
     scenarioTag: str | None = None
     formattedText: str | None = None
-    message_vector: list[float] | None = None
+    messageVector: list[float] | None = None
 
 @router.post("/preview")
 def previewFile(file: UploadFile):
@@ -80,7 +80,7 @@ def ingestFile(
         messages = [item["_source"]["message"] for item in lines]
         vectors = get_embeddings_batch(messages)
         for item, vec, in zip(lines, vectors):
-            item["_source"]["message_vector"] = vec
+            item["_source"]["messageVector"] = vec
 
     success_count, errors = helpers.bulk(client, lines, stats_only=True)
 
@@ -164,7 +164,7 @@ def indexLogs():
 
     actions = []
     for log, vec in zip(logs, vectors):
-        log.message_vector = vec
+        log.messageVector = vec
         actions.append({
             "_index": "system-logs",
             "_source": log.model_dump(mode="json")
@@ -235,6 +235,72 @@ def searchLogs(
                     {"timeStamp": {"order": "desc"}}
                 ]
             }
+        )
+        return response["hits"]["hits"]
+    except OpenSearchException as e:
+        raise HTTPException(status_code=500, detail=str(e))
+
+@router.get("/hybrid-search")
+def hybridSearchLogs(
+    q: str,
+    service: str | None = None,
+    severity: str | None = None,
+    dateFrom: str | None = None,
+    dateTo: str | None = None,
+    k: int = 10
+    ):
+    queryVector = get_embedding(q)
+
+    filterClauses = []
+    timeRange = {}
+    if service and service != "":
+        filterClauses.append({"term": {"service": service}})
+    if severity and severity != "":
+        filterClauses.append({"term": {"severity": severity.upper()}})
+    if dateFrom and dateFrom != "":
+        timeRange["gte"] = dateFrom
+    if dateTo and dateTo != "":
+        timeRange["lte"] = dateTo
+    if timeRange != {}:
+        filterClauses.append({"range": {"timeStamp": timeRange}})
+
+    keywordQuery={
+        "bool": {
+            "must": [{"match": {"message": q}}],
+            "filter": filterClauses
+        }
+    }
+
+    knnSubquery={
+        "vector": queryVector,
+        "k": k
+    }
+
+    if filterClauses:
+        knnSubquery["filter"] = {"bool": {"filter": filterClauses}}
+
+    vectorQuery={
+        "knn": {
+            "message_vector": knnSubquery
+        }
+    }
+    body={
+        "size": k,
+        "_source": {"excludes": ["messageVector"]},
+        "query": {
+            "hybrid": {
+                "queries": [
+                    keywordQuery,
+                    vectorQuery
+                ]
+            }
+        }
+    }
+    try:
+        response = client.search(
+            index="system-logs",
+            body=body,
+            params={"search_pipeline": "hybrid-log-pipeline"}
         )
         return response["hits"]["hits"]
     except OpenSearchException as e:

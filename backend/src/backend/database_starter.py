@@ -40,3 +40,31 @@ if client.indices.exists(index=INDEX_NAME):
 
 client.indices.create(index=INDEX_NAME, body=index_body)
 print(f"Index '{INDEX_NAME}' created.")
+
+PIPELINE_NAME = "hybrid-log-pipeline"
+
+pipeline_body= {
+    "description": "pipeline for BM25 and k-NN point normalization",
+    "phase_results_processors": [
+        {
+            "normalization-processor": {
+                "normalization": {
+                    "technique": "min_max"
+                },
+                "combination": {
+                    "technique": "arithmetic_mean",
+                    "parameters": {
+                        "weights": [0.3, 0.7] 
+                    }
+                }
+            }
+        }
+    ]
+}
+
+client.transport.perform_request(
+    "PUT",
+    f"/_search/pipeline/{PIPELINE_NAME}",
+    body=pipeline_body
+)
+print(f"Search Pipeline '{PIPELINE_NAME}' created.")

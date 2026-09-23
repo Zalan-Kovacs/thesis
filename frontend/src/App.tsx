@@ -18,7 +18,7 @@ function App() {
     <>
       <div style={{ marginBottom: "20px" }}>
         <label htmlFor="view-select" style={{ marginRight: "10px" }}>
-          Nézet kiválasztása:
+          Menu:
         </label>
         <select
           id="view-select"
