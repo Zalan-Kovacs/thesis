@@ -1,6 +1,8 @@
 import { useState } from "react";
 
 interface LogHit {
+  _id: string;
+  _score?: number;
   _source: {
     timeStamp: string;
     service: string;
@@ -16,9 +18,7 @@ export default function LogSearch() {
   const [severity, setSeverity] = useState<string>("");
   const [dateFrom, setDateFrom] = useState<string>("");
   const [dateTo, setDateTo] = useState<string>("");
-  const [logs, setLogs] = useState<
-    Array<{ _id: string; _source: LogHit["_source"] }>
-  >([]);
+  const [logs, setLogs] = useState<LogHit[]>([]);
 
   const handleSearch = async (e: React.FormEvent) => {
     e.preventDefault();
@@ -31,8 +31,11 @@ export default function LogSearch() {
     if (dateFrom != "") params.append("dateFrom", dateFrom.trim());
     if (dateTo != "") params.append("dateTo", dateTo.trim());
 
+    const endpoint =
+      q.trim() !== "" ? "/api/logs/hybrid-search" : "/api/logs/search";
+
     try {
-      const res = await fetch(`/api/logs/search?${params.toString()}`);
+      const res = await fetch(`${endpoint}?${params.toString()}`);
       const data = await res.json();
       if (Array.isArray(data)) setLogs(data);
     } catch (err) {
@@ -95,6 +98,13 @@ export default function LogSearch() {
             <strong> [{item._source.service}]</strong>
             <span> [{item._source.severity}] </span>
             {item._source.message}
+            {item._score !== undefined && (
+              <span
+                style={{ color: "gray", fontSize: "0.85em", marginLeft: "8px" }}
+              >
+                (Score: {item._score.toFixed(4)})
+              </span>
+            )}
           </li>
         ))}
       </ul>

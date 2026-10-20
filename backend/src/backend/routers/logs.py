@@ -1,5 +1,6 @@
 import json
 import os
+import re
 from datetime import datetime
 from zoneinfo import ZoneInfo
 
@@ -7,7 +8,7 @@ from fastapi import APIRouter, File, Form, HTTPException, UploadFile
 from opensearchpy import OpenSearch, OpenSearchException, helpers
 from pydantic import BaseModel
 
-from ..embeddings import get_embedding, get_embeddings_batch 
+from ..embeddings import get_embedding, get_embeddings_batch
 
 router = APIRouter(
     prefix="/logs",
@@ -15,6 +16,20 @@ router = APIRouter(
     responses={404: {"description": "Not found"}},
 )
 LOGS_PATH = "../synth_logs.log"
+
+IDENTIFIER_PATTERNS = [
+    r"trace_id=[a-fA-F0-9\-]+",
+    r"user(?:_id)?=\d+",
+    r"\b[0-9a-fA-F]{8}\b",
+    r"\b[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}\b",
+    r"\b(?:[0-9]{1,3}\.){3}[0-9]{1,3}\b",
+]
+IDENTIFIER_REGEX = re.compile("|".join(IDENTIFIER_PATTERNS), re.IGNORECASE)
+
+
+def isExactIdentifierQuery(text: str) -> bool:
+    return bool(IDENTIFIER_REGEX.search(text))
+
 
 class LogEntry(BaseModel):
     timeStamp: datetime
@@ -26,17 +41,20 @@ class LogEntry(BaseModel):
     formattedText: str | None = None
     messageVector: list[float] | None = None
 
+
 @router.post("/preview")
 def previewFile(file: UploadFile):
     firstLine = (file.file.readline()).decode("utf-8")
     return {"First Line": firstLine}
+
 
 @router.post("/ingest")
 def ingestFile(
     file: UploadFile = File(...),
     service: str = Form(...),
     separator: str = Form(...),
-    mapping: str = Form(...)):
+    mapping: str = Form(...),
+):
     mapping_dict = json.loads(mapping)
     lines = []
     for line_bytes in file.file:
@@ -45,9 +63,17 @@ def ingestFile(
             continue
 
         parts = line.split(separator)
-        ts_parts = [parts[int(i)] for i, field in mapping_dict.items() if field == "timestamp" and int(i) < len(parts)]
+        ts_parts = [
+            parts[int(i)]
+            for i, field in mapping_dict.items()
+            if field == "timestamp" and int(i) < len(parts)
+        ]
         ts_val = " ".join(ts_parts)
-        svr_parts = [parts[int(i)] for i, field in mapping_dict.items() if field == "severity" and int(i) < len(parts)]
+        svr_parts = [
+            parts[int(i)]
+            for i, field in mapping_dict.items()
+            if field == "severity" and int(i) < len(parts)
+        ]
         svr_val = " ".join(svr_parts)
         msg_indices = [int(i) for i, f in mapping_dict.items() if f == "message"]
         if msg_indices:
@@ -60,43 +86,45 @@ def ingestFile(
         svr_val = svr_val.strip(" :").upper()
         try:
             parsed_ts = datetime.strptime(ts_val, "%Y-%m-%d %H:%M:%S").replace(
-                                        tzinfo=ZoneInfo("UTC")
-                                    )
+                tzinfo=ZoneInfo("UTC")
+            )
         except ValueError:
             parsed_ts = datetime.now(ZoneInfo("UTC"))
 
-        lines.append({
-            "_index": "system-logs",
-            "_source": {
-                "timeStamp": parsed_ts.isoformat(),
-                "service": service,
-                "severity": svr_val or "INFO",
-                "message": message_val,
-                "source": "historic",
-                "formattedText": f"[{service}] [{svr_val}] {message_val}"
+        lines.append(
+            {
+                "_index": "system-logs",
+                "_source": {
+                    "timeStamp": parsed_ts.isoformat(),
+                    "service": service,
+                    "severity": svr_val or "INFO",
+                    "message": message_val,
+                    "source": "historic",
+                    "formattedText": f"[{service}] [{svr_val}] {message_val}",
+                },
             }
-        })
+        )
     if lines:
         messages = [item["_source"]["message"] for item in lines]
         vectors = get_embeddings_batch(messages)
-        for item, vec, in zip(lines, vectors):
-            item["_source"]["messageVector"] = vec
+        for (
+            item,
+            vec,
+        ) in zip(lines, vectors):
+            item["_source"]["message_vector"] = vec
 
     success_count, errors = helpers.bulk(client, lines, stats_only=True)
 
-    return {
-        "status": "success",
-        "indexed_count": success_count,
-        "errors_count": errors
-    }
+    return {"status": "success", "indexed_count": success_count, "errors_count": errors}
 
 
 @router.get("/load", response_model=list[LogEntry])
 def loadLogs():
     if not os.path.exists(LOGS_PATH):
         raise HTTPException(
-                    status_code=404, detail="Log file not found. Run log_generator.py first.")
-    
+            status_code=404, detail="Log file not found. Run log_generator.py first."
+        )
+
     with open(LOGS_PATH, "r", encoding="utf-8") as f:
         lines = f.readlines()
     logs = []
@@ -114,9 +142,9 @@ def loadLogs():
                 severity = "INFO"
                 message = parts[1]
             try:
-                timeStamp = datetime.strptime(timeStampStr, "%Y-%m-%d %H:%M:%S").replace(
-                    tzinfo=ZoneInfo("UTC")
-                )
+                timeStamp = datetime.strptime(
+                    timeStampStr, "%Y-%m-%d %H:%M:%S"
+                ).replace(tzinfo=ZoneInfo("UTC"))
             except ValueError:
                 timeStamp = datetime.now(ZoneInfo("UTC"))
             service = "def_svc"
@@ -133,23 +161,23 @@ def loadLogs():
             print(e)
 
     return logs
-    
 
-host = 'localhost'
+
+host = "localhost"
 port = 9200
-#auth = ('admin', 'Admin123!')
-#ca_certs_path = '/full/path/to/root-ca.pem' # Provide a CA bundle if you use intermediate CAs with your root CA.
+# auth = ('admin', 'Admin123!')
+# ca_certs_path = '/full/path/to/root-ca.pem' # Provide a CA bundle if you use intermediate CAs with your root CA.
 
 
 client = OpenSearch(
-    hosts = [{'host': host, 'port': port}],
-    http_compress = True,
-    #http_auth = auth, TODO
-    use_ssl = False, #True TODO ha https lesz
-    verify_certs = True, #True TODO ha auth lesz
-    ssl_assert_hostname = False,
-    ssl_show_warn = False,
-    #ca_certs = ca_certs_path
+    hosts=[{"host": host, "port": port}],
+    http_compress=True,
+    # http_auth = auth, TODO
+    use_ssl=False,  # True TODO ha https lesz
+    verify_certs=True,  # True TODO ha auth lesz
+    ssl_assert_hostname=False,
+    ssl_show_warn=False,
+    # ca_certs = ca_certs_path
 )
 
 
@@ -158,17 +186,16 @@ def indexLogs():
     logs = loadLogs()
     if not logs:
         raise HTTPException(status_code=400, detail="No logs To Index")
-    
+
     messages = [log.message for log in logs]
     vectors = get_embeddings_batch(messages)
 
     actions = []
     for log, vec in zip(logs, vectors):
         log.messageVector = vec
-        actions.append({
-            "_index": "system-logs",
-            "_source": log.model_dump(mode="json")
-        })
+        actions.append(
+            {"_index": "system-logs", "_source": log.model_dump(mode="json")}
+        )
 
     success_count, errors = helpers.bulk(client, actions, stats_only=True)
     return {"status": 200, "indexed_count": success_count, "errors_count": errors}
@@ -180,16 +207,15 @@ def getAllLogs():
         response = client.search(
             index="system-logs",
             body={
-                "query": {
-                    "match_all": {}
-                },
-                "size": 100 #TODO expand if needed
-            }
+                "query": {"match_all": {}},
+                "size": 100,  # TODO expand if needed
+            },
         )
-        
+
         return response
     except OpenSearchException as e:
         raise HTTPException(status_code=500, detail=str(e))
+
 
 @router.get("/search")
 def searchLogs(
@@ -198,7 +224,7 @@ def searchLogs(
     severity: str | None = None,
     dateFrom: str | None = None,
     dateTo: str | None = None,
-    ):
+):
     mustClauses = []
     filterClauses = []
     timeRange = {}
@@ -231,14 +257,13 @@ def searchLogs(
             body={
                 "query": query,
                 "size": 50,
-                "sort": [
-                    {"timeStamp": {"order": "desc"}}
-                ]
-            }
+                "sort": [{"timeStamp": {"order": "desc"}}],
+            },
         )
         return response["hits"]["hits"]
     except OpenSearchException as e:
         raise HTTPException(status_code=500, detail=str(e))
+
 
 @router.get("/hybrid-search")
 def hybridSearchLogs(
@@ -247,9 +272,9 @@ def hybridSearchLogs(
     severity: str | None = None,
     dateFrom: str | None = None,
     dateTo: str | None = None,
-    k: int = 10
-    ):
-    queryVector = get_embedding(q)
+    k: int = 10,
+):
+    q_clean = q.strip()
 
     filterClauses = []
     timeRange = {}
@@ -264,43 +289,50 @@ def hybridSearchLogs(
     if timeRange != {}:
         filterClauses.append({"range": {"timeStamp": timeRange}})
 
-    keywordQuery={
+    if isExactIdentifierQuery(q_clean):
+        bm25Body = {
+            "size": k,
+            "_source": {"excludes": ["messageVector"]},
+            "query": {
+                "bool": {
+                    "must": [{"match": {"message": q_clean}}],
+                    "filter": filterClauses,
+                }
+            },
+        }
+        try:
+            response = client.search(
+                index="system-logs",
+                body=bm25Body,
+            )
+            return response["hits"]["hits"]
+        except OpenSearchException as e:
+            raise HTTPException(status_code=500, detail=str(e))
+
+    queryVector = get_embedding(q_clean)
+    keywordQuery = {
         "bool": {
-            "must": [{"match": {"message": q}}],
-            "filter": filterClauses
+            "must": [{"match": {"message": q_clean}}],
+            "filter": filterClauses,
         }
     }
 
-    knnSubquery={
-        "vector": queryVector,
-        "k": k
-    }
+    knnSubquery = {"vector": queryVector, "k": k}
 
     if filterClauses:
         knnSubquery["filter"] = {"bool": {"filter": filterClauses}}
 
-    vectorQuery={
-        "knn": {
-            "message_vector": knnSubquery
-        }
-    }
-    body={
+    vectorQuery = {"knn": {"message_vector": knnSubquery}}
+    body = {
         "size": k,
         "_source": {"excludes": ["messageVector"]},
-        "query": {
-            "hybrid": {
-                "queries": [
-                    keywordQuery,
-                    vectorQuery
-                ]
-            }
-        }
+        "query": {"hybrid": {"queries": [keywordQuery, vectorQuery]}},
     }
     try:
         response = client.search(
             index="system-logs",
             body=body,
-            params={"search_pipeline": "hybrid-log-pipeline"}
+            params={"search_pipeline": "hybrid-log-pipeline"},
         )
         return response["hits"]["hits"]
     except OpenSearchException as e:
