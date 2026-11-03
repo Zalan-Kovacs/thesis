@@ -1,6 +1,10 @@
 #!/bin/bash
+set -e
 
-docker compose up -d
+trap "docker compose down" EXIT INT TERM
+
+echo "Starting Containers..."
+docker compose up -d --build
 
 echo "Waiting for OpenSearch..."
 until curl -s http://localhost:9200 > /dev/null; do
@@ -8,16 +12,8 @@ until curl -s http://localhost:9200 > /dev/null; do
 done
 echo "OpenSearch is running."
 
-cd backend
-uv run fastapi dev src/backend/main.py &
-BACKEND_PID=$!
-cd ..
+echo "Pipeline and indeces check / initialization..."
+docker compose exec -T backend python -m src.backend.init_opensearch
 
-cd frontend
-npm run dev &
-FRONTEND_PID=$!
-cd ..
-
-trap "kill $BACKEND_PID $FRONTEND_PID 2>/dev/null" EXIT
-
-wait
+echo "System is ready. Logs:"
+docker compose logs -f

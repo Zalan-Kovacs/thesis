@@ -2,13 +2,22 @@ import json
 import os
 import re
 from datetime import datetime
+from typing import Annotated
 from zoneinfo import ZoneInfo
 
-from fastapi import APIRouter, File, Form, HTTPException, UploadFile
+from fastapi import APIRouter, Depends, File, Form, HTTPException, UploadFile
 from opensearchpy import OpenSearch, OpenSearchException, helpers
 from pydantic import BaseModel
+from sqlalchemy.orm import Session
 
 from ..embeddings import get_embedding, get_embeddings_batch
+from .auth import (
+    SavedPatternModel,
+    SearchHistoryModel,
+    UserModel,
+    get_current_user,
+    get_db,
+)
 
 router = APIRouter(
     prefix="/logs",
@@ -39,8 +48,24 @@ class LogEntry(BaseModel):
     source: str = "historic"
     scenarioTag: str | None = None
     formattedText: str | None = None
-    messageVector: list[float] | None = None
+    message_vector: list[float] | None = None
 
+
+class IncidentResolutionCreate(BaseModel):
+    problem_message: str
+    service: str
+    resolution: str
+
+class SearchParamsPayload(BaseModel):
+    q: str | None = None
+    service: str | None = None
+    severity: str | None = None
+    dateFrom: str | None = None
+    dateTo: str | None = None
+
+
+class SavePatternPayload(SearchParamsPayload):
+    name: str
 
 @router.post("/preview")
 def previewFile(file: UploadFile):
@@ -163,8 +188,8 @@ def loadLogs():
     return logs
 
 
-host = "localhost"
-port = 9200
+host = os.getenv("OPENSEARCH_HOST", "localhost")
+port = int(os.getenv("OPENSEARCH_PORT", "9200"))
 # auth = ('admin', 'Admin123!')
 # ca_certs_path = '/full/path/to/root-ca.pem' # Provide a CA bundle if you use intermediate CAs with your root CA.
 
@@ -192,7 +217,7 @@ def indexLogs():
 
     actions = []
     for log, vec in zip(logs, vectors):
-        log.messageVector = vec
+        log.message_vector = vec
         actions.append(
             {"_index": "system-logs", "_source": log.model_dump(mode="json")}
         )
@@ -292,7 +317,7 @@ def hybridSearchLogs(
     if isExactIdentifierQuery(q_clean):
         bm25Body = {
             "size": k,
-            "_source": {"excludes": ["messageVector"]},
+            "_source": {"excludes": ["message_vector"]},
             "query": {
                 "bool": {
                     "must": [{"match": {"message": q_clean}}],
@@ -325,7 +350,7 @@ def hybridSearchLogs(
     vectorQuery = {"knn": {"message_vector": knnSubquery}}
     body = {
         "size": k,
-        "_source": {"excludes": ["messageVector"]},
+        "_source": {"excludes": ["message_vector"]},
         "query": {"hybrid": {"queries": [keywordQuery, vectorQuery]}},
     }
     try:
@@ -337,3 +362,188 @@ def hybridSearchLogs(
         return response["hits"]["hits"]
     except OpenSearchException as e:
         raise HTTPException(status_code=500, detail=str(e))
+
+
+@router.post("/knowledge/resolve")
+def save_incident_resolution(
+    data: IncidentResolutionCreate,
+    current_user: Annotated[UserModel, Depends(get_current_user)],
+):
+    if not data.resolution.strip():
+        raise HTTPException(
+            status_code=400, detail="Resolution Description cannot be empty."
+        )
+
+    clean_msg = data.problem_message.strip()
+    vector = get_embedding(clean_msg)
+
+    doc = {
+        "problem_message": clean_msg,
+        "problem_vector": vector,
+        "resolution": data.resolution.strip(),
+        "service": data.service,
+        "author": current_user.username,
+        "created_at": datetime.now(ZoneInfo("UTC")).isoformat(),
+    }
+
+    try:
+        res = client.index(
+            index="incident-knowledge", body=doc, params={"refresh": "true"}
+        )
+        return {
+            "status": "success",
+            "id": res["_id"],
+            "resolution": data.resolution.strip(),
+            "author": current_user.username,
+        }
+    except OpenSearchException as e:
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+@router.get("/knowledge/suggest")
+def suggest_resolution_for_log(message: str, threshold: float = 1.30, limit: int = 3):
+    if not message.strip():
+        return {"match": False, "suggestion": []}
+
+    query_vector = get_embedding(message.strip())
+
+    knn_query = {
+        "size": limit,
+        "_source": [
+            "problem_message",
+            "resolution",
+            "author",
+            "service",
+            "created_at",
+        ],
+        "query": {
+            "knn": {
+                "problem_vector": {
+                    "vector": query_vector,
+                    "k": limit,
+                }
+            }
+        },
+    }
+
+    try:
+        response = client.search(index="incident-knowledge", body=knn_query)
+        hits = response["hits"]["hits"]
+
+        valid_suggestions = []
+        for hit in hits:
+            score = hit["_score"]
+            if score >= threshold:
+                src = hit["_source"]
+                valid_suggestions.append(
+                    {
+                        "score": round(score, 4),
+                        "resolution": src["resolution"],
+                        "author": src["author"],
+                        "service": src.get("service"),
+                        "original_pattern": src["problem_message"],
+                        "created_at": src.get("created_at"),
+                    }
+                )
+        return {
+            "match": len(valid_suggestions) > 0,
+            "count": len(valid_suggestions),
+            "suggestions": valid_suggestions,
+        }
+    except OpenSearchException as e:
+        raise HTTPException(status_code=500, detail=str(e))
+
+@router.post("/history")
+def record_search_history(
+    params: SearchParamsPayload,
+    current_user: Annotated[UserModel, Depends(get_current_user)],
+    db: Annotated[Session, Depends(get_db)],
+):
+    history_entry = SearchHistoryModel(
+        user_id=current_user.id,
+        q=params.q,
+        service=params.service,
+        severity=params.severity,
+        date_from=params.dateFrom,
+        date_to=params.dateTo,
+    )
+    db.add(history_entry)
+    db.commit()
+    return {"status": "ok"}
+
+
+@router.get("/history")
+def get_search_history(
+    current_user: Annotated[UserModel, Depends(get_current_user)],
+    db: Annotated[Session, Depends(get_db)],
+):
+    entries = (
+        db.query(SearchHistoryModel)
+        .filter(SearchHistoryModel.user_id == current_user.id)
+        .order_by(SearchHistoryModel.created_at.desc())
+        .limit(10)
+        .all()
+    )
+    return entries
+
+
+# --- GYAKORI KERESÉSI MINTÁK (PRESETEK) ---
+
+
+@router.post("/patterns")
+def create_saved_pattern(
+    pattern: SavePatternPayload,
+    current_user: Annotated[UserModel, Depends(get_current_user)],
+    db: Annotated[Session, Depends(get_db)],
+):
+    if not pattern.name.strip():
+        raise HTTPException(status_code=400, detail="A minta neve nem lehet üres.")
+
+    new_pattern = SavedPatternModel(
+        user_id=current_user.id,
+        name=pattern.name.strip(),
+        q=pattern.q,
+        service=pattern.service,
+        severity=pattern.severity,
+        date_from=pattern.dateFrom,
+        date_to=pattern.dateTo,
+    )
+    db.add(new_pattern)
+    db.commit()
+    return {"status": "ok", "id": new_pattern.id}
+
+
+@router.get("/patterns")
+def get_saved_patterns(
+    current_user: Annotated[UserModel, Depends(get_current_user)],
+    db: Annotated[Session, Depends(get_db)],
+):
+    patterns = (
+        db.query(SavedPatternModel)
+        .filter(SavedPatternModel.user_id == current_user.id)
+        .order_by(SavedPatternModel.created_at.desc())
+        .all()
+    )
+    return patterns
+
+
+@router.delete("/patterns/{pattern_id}")
+def delete_saved_pattern(
+    pattern_id: int,
+    current_user: Annotated[UserModel, Depends(get_current_user)],
+    db: Annotated[Session, Depends(get_db)],
+):
+    pattern = (
+        db.query(SavedPatternModel)
+        .filter(
+            SavedPatternModel.id == pattern_id,
+            SavedPatternModel.user_id == current_user.id,
+        )
+        .first()
+    )
+    if not pattern:
+        raise HTTPException(status_code=404, detail="A minta nem található.")
+
+    db.delete(pattern)
+    db.commit()
+    return {"status": "deleted"}

@@ -18,6 +18,50 @@ services:
       - opensearch-data:/usr/share/opensearch/data
     ports:
       - "9200:9200"
+    networks:
+      - thesis-network
+  backend:
+    build:
+      context: ./backend
+      dockerfile: Dockerfile
+    container_name: thesis-backend
+    environment:
+      - OPENSEARCH_HOST=opensearch
+      - OPENSEARCH_PORT=9200
+      - HF_HOME=/root/.cache/huggingface
+    volumes:
+      - ./backend:/app
+      - backend-sqlite-data:/app/data
+      - huggingface-cache:/root/.cache/huggingface
+    ports:
+      - "8000:8000"
+    depends_on:
+      - opensearch
+    networks:
+      - thesis-network
+
+  frontend:
+    build:
+      context: ./frontend
+      dockerfile: Dockerfile
+    container_name: thesis-frontend
+    environment:
+      - VITE_BACKEND_URL=http://backend:8000
+    volumes:
+      - ./frontend:/app
+      - /app/node_modules
+    ports:
+      - "5173:5173"
+    depends_on:
+      - backend
+    networks:
+      - thesis-network
 
 volumes:
   opensearch-data:
+  backend-sqlite-data:
+  huggingface-cache:
+
+networks:
+  thesis-network:
+    driver: bridge

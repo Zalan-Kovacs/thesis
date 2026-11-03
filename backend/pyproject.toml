@@ -8,10 +8,14 @@ description = "Add your description here"
 readme = "README.md"
 requires-python = ">=3.12"
 dependencies = [
+    "bcrypt>=5.0.0",
     "fastapi[standard]>=0.140.13",
     "opensearch-py>=3.2.0",
     "pydantic-settings>=2.14.2",
+    "pyjwt>=2.15.1",
+    "python-multipart>=0.0.32",
     "sentence-transformers>=5.6.1",
+    "sqlalchemy>=2.1.6",
     "uvicorn>=0.52.0",
 ]
 

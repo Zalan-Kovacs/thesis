@@ -1,10 +1,14 @@
 import { useEffect, useState } from "react";
+import Auth from "./components/Auth";
 import Health from "./components/Health";
 import LogSearch from "./components/LogSearch";
 import LogLoad from "./components/LogLoad";
 import "./App.css";
 
 function App() {
+  const [token, setToken] = useState<string | null>(() =>
+    localStorage.getItem("token"),
+  );
   const [health, setHealth] = useState(null);
   const [activeView, setActiveView] = useState<string>("load");
 
@@ -15,42 +19,34 @@ function App() {
   }, []);
 
   return (
-    <>
-      <div style={{ marginBottom: "20px" }}>
-        <label htmlFor="view-select" style={{ marginRight: "10px" }}>
-          Menu:
-        </label>
-        <select
-          id="view-select"
-          value={activeView}
-          onChange={(e) => setActiveView(e.target.value)}
-        >
-          <option value="health">Health</option>
-          <option value="load">LogLoad</option>
-          <option value="search">LogSearch</option>
-        </select>
-      </div>
-      <section id="center"></section>
-      {activeView === "health" && (
-        <section>
-          <Health health={health} />
-        </section>
-      )}
+    <main className="container">
+      <nav>
+        <ul>
+          <li>
+            <strong>Log Assistant</strong>
+          </li>
+        </ul>
+        <ul>
+          <li>
+            <select
+              id="view-select"
+              value={activeView}
+              onChange={(e) => setActiveView(e.target.value)}
+            >
+              <option value="search">LogSearch</option>
+              <option value="load">LogLoad</option>
+              <option value="health">Health</option>
+            </select>
+          </li>
+        </ul>
+      </nav>
 
-      {activeView === "load" && (
-        <section>
-          <h2>LogLoad</h2>
-          <LogLoad />
-        </section>
-      )}
+      <Auth token={token} setToken={setToken} />
 
-      {activeView === "search" && (
-        <section>
-          <h2>LogSearch</h2>
-          <LogSearch />
-        </section>
-      )}
-    </>
+      {activeView === "health" && <Health health={health} />}
+      {activeView === "load" && <LogLoad />}
+      {activeView === "search" && <LogSearch token={token} />}
+    </main>
   );
 }
 

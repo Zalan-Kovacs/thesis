@@ -1,10 +1,11 @@
 from fastapi import FastAPI
 
-from .routers import logs
+from .routers import logs, auth
 
 app = FastAPI()
 
 app.include_router(logs.router)
+app.include_router(auth.router)
 
 @app.get("/")
 def readRoot():

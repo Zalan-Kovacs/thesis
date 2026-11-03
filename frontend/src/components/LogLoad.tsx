@@ -45,7 +45,7 @@ export default function LogLoad() {
     try {
       const formData = new FormData();
       formData.append("file", file);
-      const response = await fetch("api/logs/preview", {
+      const response = await fetch("/api/logs/preview", {
         method: "POST",
         body: formData,
       });
