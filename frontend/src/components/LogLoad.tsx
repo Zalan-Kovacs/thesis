@@ -31,7 +31,8 @@ export default function LogLoad() {
       const result = await response.json();
       alert(`Successful indexing: ${result.indexed_count} row.`);
     } catch (err) {
-      console.error("Hiba az indexelés során:", err);
+      console.error("Indexing error:", err);
+      alert("Network error during indexing");
     }
   };
   const loadPreview = async (e: React.FormEvent) => {
@@ -56,8 +57,10 @@ export default function LogLoad() {
 
       const data = await response.json();
       setPreviewLine(data["First Line"] || "");
+      setFieldMapping({});
     } catch (err) {
       console.error("Error during the load of preview:", err);
+      alert("Failed to load preview.");
     }
   };
   const tokens = previewLine
@@ -81,14 +84,21 @@ export default function LogLoad() {
           type="file"
           name="File"
           id="file"
-          onChange={(e) => setFile(e.target.files?.[0] || null)}
+          onChange={(e) => {
+            setFile(e.target.files?.[0] || null);
+            setPreviewLine("");
+            setFieldMapping({});
+          }}
           required
         />
         <select
           name="separator"
           id="sep"
           value={separator}
-          onChange={(e) => setSeparator(e.target.value)}
+          onChange={(e) => {
+            setSeparator(e.target.value);
+            setFieldMapping({});
+          }}
         >
           <option value=" ">" "</option>
           <option value=": ">": "</option>

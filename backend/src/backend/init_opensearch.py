@@ -30,7 +30,12 @@ def init_system_logs(force_drop: bool = False):
             return
 
     index_body = {
-        "settings": {"index": {"knn": True}},
+        "settings": {
+            "index": {
+                "knn": True,
+                "number_of_replicas": 0,
+            }
+        },
         "mappings": {
             "properties": {
                 "timeStamp": {"type": "date"},
@@ -56,11 +61,16 @@ def init_system_logs(force_drop: bool = False):
 
 def init_incident_knowledge():
     if client.indices.exists(index=KNOWLEDGE_INDEX):
-        print(f"[SKIP] '{KNOWLEDGE_INDEX}' index már létezik.")
+        print(f"[SKIP] '{KNOWLEDGE_INDEX}' index already exists.")
         return
 
     index_body = {
-        "settings": {"index": {"knn": True}},
+        "settings": {
+            "index": {
+                "knn": True,
+                "number_of_replicas": 0,
+            }
+        },
         "mappings": {
             "properties": {
                 "problem_message": {"type": "text"},
@@ -108,6 +118,13 @@ def init_search_pipeline():
     except OpenSearchException as e:
         print(f"[ERROR] Pipeline setup failed: {e}", file=sys.stderr)
 
+def init_all(force_drop_logs: bool = False):
+    try:
+        init_system_logs(force_drop=force_drop_logs)
+        init_incident_knowledge()
+        init_search_pipeline()
+    except Exception as e:
+        print(f"[WARN] OpenSearch init skipped or failed: {e}", file=sys.stderr)
 
 if __name__ == "__main__":
     drop_logs = "--reset-logs" in sys.argv

@@ -199,7 +199,7 @@ export default function LogSearch({ token }: LogSearchProps) {
     setLoadingSuggestionId(logId);
     try {
       const res = await fetch(
-        `/api/logs/knowledge/suggest?message=${encodeURIComponent(message)}&threshold=1.30&limit=3`,
+        `/api/logs/knowledge/suggest?message=${encodeURIComponent(message)}&limit=3`,
       );
       const data = await res.json();
       setSuggestions((prev) => ({
@@ -207,7 +207,7 @@ export default function LogSearch({ token }: LogSearchProps) {
         [logId]: data.match ? data.suggestions : null,
       }));
     } catch (err) {
-      console.error("Nem sikerült lekérni a javaslatokat:", err);
+      console.error("Couldn't get the suggestions:", err);
     } finally {
       setLoadingSuggestionId(null);
     }
@@ -313,7 +313,9 @@ export default function LogSearch({ token }: LogSearchProps) {
               }}
             >
               <option value="" disabled>
-                Loading search history...
+                {history.length === 0
+                  ? "No search history"
+                  : "Select from seatrch history"}
               </option>
               {history.map((h) => (
                 <option key={h.id} value={h.id}>
@@ -345,7 +347,7 @@ export default function LogSearch({ token }: LogSearchProps) {
           >
             <option value="">All severities</option>
             <option value="INFO">[INFO]</option>
-            <option value="WARNING">[WARNING]</option>
+            <option value="WARN">[WARN]</option>
             <option value="ERROR">[ERROR]</option>
           </select>
           <input
@@ -447,7 +449,8 @@ export default function LogSearch({ token }: LogSearchProps) {
                 ) : itemSuggestions === null ? (
                   <div style={{ marginTop: "0.5rem" }}>
                     <small>
-                      There are no solutions to the given threshold (1.30).
+                      There are no solutions to above the given threshold
+                      (1.80).
                     </small>
                     <button
                       type="button"

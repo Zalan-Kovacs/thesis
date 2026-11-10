@@ -1,3 +1,4 @@
+import hashlib
 import json
 import os
 import re
@@ -5,12 +6,13 @@ from datetime import datetime
 from typing import Annotated
 from zoneinfo import ZoneInfo
 
-from fastapi import APIRouter, Depends, File, Form, HTTPException, UploadFile
-from opensearchpy import OpenSearch, OpenSearchException, helpers
+from fastapi import APIRouter, Depends, File, Form, HTTPException, Query, UploadFile
+from opensearchpy import OpenSearchException, helpers
 from pydantic import BaseModel
 from sqlalchemy.orm import Session
 
 from ..embeddings import get_embedding, get_embeddings_batch
+from ..init_opensearch import KNOWLEDGE_INDEX, PIPELINE_NAME, SYSTEM_LOGS_INDEX, client
 from .auth import (
     SavedPatternModel,
     SearchHistoryModel,
@@ -27,18 +29,55 @@ router = APIRouter(
 LOGS_PATH = "../synth_logs.log"
 
 IDENTIFIER_PATTERNS = [
-    r"trace_id=[a-fA-F0-9\-]+",
+    r"trace_id=[a-zA-Z0-9\-]+",
     r"user(?:_id)?=\d+",
-    r"\b[0-9a-fA-F]{8}\b",
+    r"req-[a-fA-F0-9\-]+",
     r"\b[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}\b",
+    r"\b(?=[0-9a-fA-F]{8}\b)(?![0-9]{8}\b)[0-9a-fA-F]{8}\b",
     r"\b(?:[0-9]{1,3}\.){3}[0-9]{1,3}\b",
 ]
 IDENTIFIER_REGEX = re.compile("|".join(IDENTIFIER_PATTERNS), re.IGNORECASE)
 
+MASK_SUB_PATTERNS = [
+    (re.compile(r"(trace_id=)[a-zA-Z0-9\-]+", re.IGNORECASE), r"\1<ID>"),
+    (re.compile(r"(user(?:_id)?=)\d+", re.IGNORECASE), r"\1<ID>"),
+    (re.compile(r"\breq-[a-fA-F0-9\-]+\b", re.IGNORECASE), "req-<ID>"),
+    (
+        re.compile(
+            r"\b[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}\b"
+        ),
+        "<UUID>",
+    ),
+]
 
 def isExactIdentifierQuery(text: str) -> bool:
     return bool(IDENTIFIER_REGEX.search(text))
 
+def mask_identifiers(text: str) -> str:
+    masked = text.strip()
+    for pattern, repl in MASK_SUB_PATTERNS:
+        masked = pattern.sub(repl, masked)
+    return masked
+
+def normalize_severity(svr: str | None) -> str:
+    if not svr:
+        return "INFO"
+    val = svr.strip(" :[]").upper()
+    if val in ("WARN", "WARNING"):
+        return "WARN"
+    if val in ("ERR", "ERROR", "FATAL", "SEVERE"):
+        return "ERROR"
+    return "INFO"
+
+def compute_log_id(service: str, timestamp_iso: str, message: str) -> str:
+    raw = f"{service.strip()}|{timestamp_iso.strip()}|{message.strip()}"
+    return hashlib.sha256(raw.encode("utf-8")).hexdigest()
+
+
+def split_log_line(line: str, separator: str) -> list[str]:
+    if separator == " " or separator.strip() == "":
+        return re.split(r"\s+", line.strip())
+    return line.split(separator)
 
 class LogEntry(BaseModel):
     timeStamp: datetime
@@ -49,7 +88,6 @@ class LogEntry(BaseModel):
     scenarioTag: str | None = None
     formattedText: str | None = None
     message_vector: list[float] | None = None
-
 
 class IncidentResolutionCreate(BaseModel):
     problem_message: str
@@ -63,13 +101,12 @@ class SearchParamsPayload(BaseModel):
     dateFrom: str | None = None
     dateTo: str | None = None
 
-
 class SavePatternPayload(SearchParamsPayload):
     name: str
 
 @router.post("/preview")
 def previewFile(file: UploadFile):
-    firstLine = (file.file.readline()).decode("utf-8")
+    firstLine = (file.file.readline()).decode("utf-8", errors="replace").strip()
     return {"First Line": firstLine}
 
 
@@ -105,7 +142,7 @@ def ingestFile(
             start_idx = min(msg_indices)
             message_val = separator.join(parts[start_idx:])
         else:
-            message_val = ""
+            message_val = line
 
         ts_val = ts_val.strip(" :")
         svr_val = svr_val.strip(" :").upper()
@@ -116,29 +153,39 @@ def ingestFile(
         except ValueError:
             parsed_ts = datetime.now(ZoneInfo("UTC"))
 
+        ts_iso = parsed_ts.isoformat()
+        doc_id = compute_log_id(service.strip(), ts_iso, message_val)
+        template_str = mask_identifiers(message_val)
+
         lines.append(
             {
-                "_index": "system-logs",
+                "_index": SYSTEM_LOGS_INDEX,
+                "_id": doc_id,
                 "_source": {
-                    "timeStamp": parsed_ts.isoformat(),
+                    "timeStamp": ts_iso,
                     "service": service,
                     "severity": svr_val or "INFO",
                     "message": message_val,
+                    "template": template_str,
                     "source": "historic",
                     "formattedText": f"[{service}] [{svr_val}] {message_val}",
                 },
             }
         )
     if lines:
-        messages = [item["_source"]["message"] for item in lines]
-        vectors = get_embeddings_batch(messages)
-        for (
-            item,
-            vec,
-        ) in zip(lines, vectors):
-            item["_source"]["message_vector"] = vec
+        unique_templates = list({item["_source"]["template"] for item in lines})
+        template_vectors = get_embeddings_batch(unique_templates)
+        vec_map = dict(zip(unique_templates, template_vectors))
+        for item in lines:
+            item["_source"]["message_vector"] = vec_map[item["_source"]["template"]]
 
-    success_count, errors = helpers.bulk(client, lines, stats_only=True)
+    try:
+        success_count, errors = helpers.bulk(
+            client, lines, stats_only=True, raise_on_error=False
+        )
+        client.indices.refresh(index=SYSTEM_LOGS_INDEX)
+    except OpenSearchException as e:
+        raise HTTPException(status_code=500, detail=str(e))
 
     return {"status": "success", "indexed_count": success_count, "errors_count": errors}
 
@@ -150,12 +197,13 @@ def loadLogs():
             status_code=404, detail="Log file not found. Run log_generator.py first."
         )
 
-    with open(LOGS_PATH, "r", encoding="utf-8") as f:
+    with open(LOGS_PATH, "r", encoding="utf-8", errors="replace") as f:
         lines = f.readlines()
     logs = []
     for line in lines:
         line = line.strip()
-
+        if not line:
+            continue
         try:
             parts = line.split(": ")
             if len(parts) >= 3:
@@ -176,6 +224,7 @@ def loadLogs():
             formattedText = f"[{service}] [{severity}] {message}"
             entry = LogEntry(
                 timeStamp=timeStamp,
+                service=service,
                 severity=severity,
                 message=message,
                 source="historic",
@@ -187,60 +236,51 @@ def loadLogs():
 
     return logs
 
-
-host = os.getenv("OPENSEARCH_HOST", "localhost")
-port = int(os.getenv("OPENSEARCH_PORT", "9200"))
-# auth = ('admin', 'Admin123!')
-# ca_certs_path = '/full/path/to/root-ca.pem' # Provide a CA bundle if you use intermediate CAs with your root CA.
-
-
-client = OpenSearch(
-    hosts=[{"host": host, "port": port}],
-    http_compress=True,
-    # http_auth = auth, TODO
-    use_ssl=False,  # True TODO ha https lesz
-    verify_certs=True,  # True TODO ha auth lesz
-    ssl_assert_hostname=False,
-    ssl_show_warn=False,
-    # ca_certs = ca_certs_path
-)
-
-
 @router.get("/index")
 def indexLogs():
     logs = loadLogs()
     if not logs:
         raise HTTPException(status_code=400, detail="No logs To Index")
-
-    messages = [log.message for log in logs]
-    vectors = get_embeddings_batch(messages)
+    templates = [mask_identifiers(log.message) for log in logs]
+    unique_templates = list(set(templates))
+    vectors = get_embeddings_batch(unique_templates)
+    vec_map = dict(zip(unique_templates, vectors))
 
     actions = []
-    for log, vec in zip(logs, vectors):
-        log.message_vector = vec
+    for log, template in zip(logs, templates):
+        log.message_vector = vec_map[template]
+        src = log.model_dump(mode="json")
+        src["template"] = template
+        doc_id = compute_log_id(log.service, src["timeStamp"], log.message)
         actions.append(
-            {"_index": "system-logs", "_source": log.model_dump(mode="json")}
+            {
+                "_index": SYSTEM_LOGS_INDEX,
+                "_id": doc_id,
+                "_source": src,
+            }
         )
 
-    success_count, errors = helpers.bulk(client, actions, stats_only=True)
+    success_count, errors = helpers.bulk(
+        client, actions, stats_only=True, raise_on_error=False
+    )
+    client.indices.refresh(index=SYSTEM_LOGS_INDEX)
     return {"status": 200, "indexed_count": success_count, "errors_count": errors}
-
 
 @router.get("/all")
 def getAllLogs():
     try:
         response = client.search(
-            index="system-logs",
+            index=SYSTEM_LOGS_INDEX,
             body={
+                "_source": {"excludes": ["message_vector"]},
                 "query": {"match_all": {}},
-                "size": 100,  # TODO expand if needed
+                "size": 100,
             },
         )
 
         return response
     except OpenSearchException as e:
         raise HTTPException(status_code=500, detail=str(e))
-
 
 @router.get("/search")
 def searchLogs(
@@ -278,7 +318,7 @@ def searchLogs(
             query = {"bool": bool_query}
 
         response = client.search(
-            index="system-logs",
+            index=SYSTEM_LOGS_INDEX,
             body={
                 "query": query,
                 "size": 50,
@@ -297,7 +337,7 @@ def hybridSearchLogs(
     severity: str | None = None,
     dateFrom: str | None = None,
     dateTo: str | None = None,
-    k: int = 10,
+    k: int = Query(default=10, ge=1, le=100)
 ):
     q_clean = q.strip()
 
@@ -320,21 +360,21 @@ def hybridSearchLogs(
             "_source": {"excludes": ["message_vector"]},
             "query": {
                 "bool": {
-                    "must": [{"match": {"message": q_clean}}],
+                    "must": [{"match_phrase": {"message": q_clean}}],
                     "filter": filterClauses,
                 }
             },
         }
         try:
             response = client.search(
-                index="system-logs",
+                index=SYSTEM_LOGS_INDEX,
                 body=bm25Body,
             )
             return response["hits"]["hits"]
         except OpenSearchException as e:
             raise HTTPException(status_code=500, detail=str(e))
 
-    queryVector = get_embedding(q_clean)
+    queryVector = get_embedding(mask_identifiers(q_clean))
     keywordQuery = {
         "bool": {
             "must": [{"match": {"message": q_clean}}],
@@ -355,9 +395,9 @@ def hybridSearchLogs(
     }
     try:
         response = client.search(
-            index="system-logs",
+            index=SYSTEM_LOGS_INDEX,
             body=body,
-            params={"search_pipeline": "hybrid-log-pipeline"},
+            params={"search_pipeline": PIPELINE_NAME},
         )
         return response["hits"]["hits"]
     except OpenSearchException as e:
@@ -371,24 +411,32 @@ def save_incident_resolution(
 ):
     if not data.resolution.strip():
         raise HTTPException(
-            status_code=400, detail="Resolution Description cannot be empty."
+            status_code=400, detail="Resolution description cannot be empty."
         )
 
     clean_msg = data.problem_message.strip()
-    vector = get_embedding(clean_msg)
+    masked_msg = mask_identifiers(clean_msg)
+    vector = get_embedding(masked_msg)
+
+    doc_id = hashlib.sha256(
+        f"{data.service.strip()}|{masked_msg}|{data.resolution.strip()}".encode("utf-8")
+    ).hexdigest()
 
     doc = {
-        "problem_message": clean_msg,
+        "problem_message": masked_msg,
         "problem_vector": vector,
         "resolution": data.resolution.strip(),
-        "service": data.service,
+        "service": data.service.strip(),
         "author": current_user.username,
         "created_at": datetime.now(ZoneInfo("UTC")).isoformat(),
     }
 
     try:
         res = client.index(
-            index="incident-knowledge", body=doc, params={"refresh": "true"}
+            index=KNOWLEDGE_INDEX,
+            id=doc_id,
+            body=doc,
+            params={"refresh": "true"},
         )
         return {
             "status": "success",
@@ -401,11 +449,18 @@ def save_incident_resolution(
 
 
 @router.get("/knowledge/suggest")
-def suggest_resolution_for_log(message: str, threshold: float = 1.30, limit: int = 3):
+def suggest_resolution_for_log(
+    message: str,
+    threshold: float = 1.80,
+    limit: int = Query(default=3, ge=1, le=20),
+):
     if not message.strip():
-        return {"match": False, "suggestion": []}
+        return {"match": False, "count": 0, "suggestions": []}
 
-    query_vector = get_embedding(message.strip())
+    if not client.indices.exists(index=KNOWLEDGE_INDEX):
+        return {"match": False, "count": 0, "suggestions": []}
+
+    query_vector = get_embedding(mask_identifiers(message.strip()))
 
     knn_query = {
         "size": limit,
@@ -427,7 +482,7 @@ def suggest_resolution_for_log(message: str, threshold: float = 1.30, limit: int
     }
 
     try:
-        response = client.search(index="incident-knowledge", body=knn_query)
+        response = client.search(index=KNOWLEDGE_INDEX, body=knn_query)
         hits = response["hits"]["hits"]
 
         valid_suggestions = []
@@ -471,7 +526,6 @@ def record_search_history(
     db.commit()
     return {"status": "ok"}
 
-
 @router.get("/history")
 def get_search_history(
     current_user: Annotated[UserModel, Depends(get_current_user)],
@@ -486,10 +540,6 @@ def get_search_history(
     )
     return entries
 
-
-# --- GYAKORI KERESÉSI MINTÁK (PRESETEK) ---
-
-
 @router.post("/patterns")
 def create_saved_pattern(
     pattern: SavePatternPayload,
@@ -497,7 +547,7 @@ def create_saved_pattern(
     db: Annotated[Session, Depends(get_db)],
 ):
     if not pattern.name.strip():
-        raise HTTPException(status_code=400, detail="A minta neve nem lehet üres.")
+        raise HTTPException(status_code=400, detail="Pattern name cannot be empty.")
 
     new_pattern = SavedPatternModel(
         user_id=current_user.id,
@@ -542,7 +592,7 @@ def delete_saved_pattern(
         .first()
     )
     if not pattern:
-        raise HTTPException(status_code=404, detail="A minta nem található.")
+        raise HTTPException(status_code=404, detail="Pattern not found.")
 
     db.delete(pattern)
     db.commit()

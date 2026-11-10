@@ -15,7 +15,8 @@ function App() {
   useEffect(() => {
     fetch("/api/health")
       .then((res) => res.json())
-      .then((data) => setHealth(data));
+      .then((data) => setHealth(data))
+      .catch(() => setHealth(null));
   }, []);
 
   return (
