@@ -29,6 +29,7 @@ export default function LogLoad() {
       });
 
       const result = await response.json();
+      if (!response.ok) return alert(result.detail || "Upload failed");
       alert(`Successful indexing: ${result.indexed_count} row.`);
     } catch (err) {
       console.error("Indexing error:", err);

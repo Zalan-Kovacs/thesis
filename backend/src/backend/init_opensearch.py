@@ -33,6 +33,7 @@ def init_system_logs(force_drop: bool = False):
         "settings": {
             "index": {
                 "knn": True,
+                "knn.algo_param.ef_search": 512,
                 "number_of_replicas": 0,
             }
         },
@@ -42,6 +43,7 @@ def init_system_logs(force_drop: bool = False):
                 "service": {"type": "keyword"},
                 "severity": {"type": "keyword"},
                 "message": {"type": "text"},
+                "template": {"type": "keyword"},
                 "message_vector": {
                     "type": "knn_vector",
                     "dimension": 384,
@@ -61,13 +63,14 @@ def init_system_logs(force_drop: bool = False):
 
 def init_incident_knowledge():
     if client.indices.exists(index=KNOWLEDGE_INDEX):
-        print(f"[SKIP] '{KNOWLEDGE_INDEX}' index already exists.")
+        print(f"[SKIP] '{KNOWLEDGE_INDEX}' already exists.")
         return
 
     index_body = {
         "settings": {
             "index": {
                 "knn": True,
+                "knn.algo_param.ef_search": 512,
                 "number_of_replicas": 0,
             }
         },
@@ -114,9 +117,10 @@ def init_search_pipeline():
         client.transport.perform_request(
             "PUT", f"/_search/pipeline/{PIPELINE_NAME}", body=pipeline_body
         )
-        print(f"[OK] Search Pipeline '{PIPELINE_NAME}' setup succeded.")
+        print(f"[OK] Search Pipeline '{PIPELINE_NAME}' setup succeeded.")
     except OpenSearchException as e:
         print(f"[ERROR] Pipeline setup failed: {e}", file=sys.stderr)
+
 
 def init_all(force_drop_logs: bool = False):
     try:
@@ -126,8 +130,7 @@ def init_all(force_drop_logs: bool = False):
     except Exception as e:
         print(f"[WARN] OpenSearch init skipped or failed: {e}", file=sys.stderr)
 
+
 if __name__ == "__main__":
     drop_logs = "--reset-logs" in sys.argv
-    init_system_logs(force_drop=drop_logs)
-    init_incident_knowledge()
-    init_search_pipeline()
+    init_all(force_drop_logs=drop_logs)

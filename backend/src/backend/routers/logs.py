@@ -33,7 +33,7 @@ IDENTIFIER_PATTERNS = [
     r"user(?:_id)?=\d+",
     r"req-[a-fA-F0-9\-]+",
     r"\b[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}\b",
-    r"\b(?=[0-9a-fA-F]{8}\b)(?![0-9]{8}\b)[0-9a-fA-F]{8}\b",
+    r"\b(?!(?:19|20)\d{6}\b)[0-9a-fA-F]{8}\b",
     r"\b(?:[0-9]{1,3}\.){3}[0-9]{1,3}\b",
 ]
 IDENTIFIER_REGEX = re.compile("|".join(IDENTIFIER_PATTERNS), re.IGNORECASE)
@@ -124,7 +124,7 @@ def ingestFile(
         if not line:
             continue
 
-        parts = line.split(separator)
+        parts = split_log_line(line, separator)
         ts_parts = [
             parts[int(i)]
             for i, field in mapping_dict.items()
@@ -140,18 +140,18 @@ def ingestFile(
         msg_indices = [int(i) for i, f in mapping_dict.items() if f == "message"]
         if msg_indices:
             start_idx = min(msg_indices)
-            message_val = separator.join(parts[start_idx:])
+            message_val = separator.join(parts[start_idx:]).strip()
         else:
             message_val = line
 
         ts_val = ts_val.strip(" :")
-        svr_val = svr_val.strip(" :").upper()
+        svr_val = normalize_severity(svr_val)
         try:
-            parsed_ts = datetime.strptime(ts_val, "%Y-%m-%d %H:%M:%S").replace(
-                tzinfo=ZoneInfo("UTC")
-            )
+            parsed_ts = datetime.fromisoformat(ts_val.replace("Z", "+00:00"))
+            if parsed_ts.tzinfo is None:
+                parsed_ts = parsed_ts.replace(tzinfo=ZoneInfo("UTC"))
         except ValueError:
-            parsed_ts = datetime.now(ZoneInfo("UTC"))
+            raise HTTPException(status_code=400, detail=f"Invalid timestamp: {ts_val}")
 
         ts_iso = parsed_ts.isoformat()
         doc_id = compute_log_id(service.strip(), ts_iso, message_val)
@@ -173,12 +173,11 @@ def ingestFile(
             }
         )
     if lines:
-        unique_templates = list({item["_source"]["template"] for item in lines})
-        template_vectors = get_embeddings_batch(unique_templates)
-        vec_map = dict(zip(unique_templates, template_vectors))
-        for item in lines:
-            item["_source"]["message_vector"] = vec_map[item["_source"]["template"]]
-
+        messages = [item["_source"]["message"] for item in lines]
+        vectors = get_embeddings_batch(messages)
+        for item, vec in zip(lines, vectors):
+            item["_source"]["message_vector"] = vec
+            
     try:
         success_count, errors = helpers.bulk(
             client, lines, stats_only=True, raise_on_error=False
@@ -208,8 +207,8 @@ def loadLogs():
             parts = line.split(": ")
             if len(parts) >= 3:
                 timeStampStr = parts[0]
-                severity = parts[1]
-                message = "".join(parts[2:])
+                severity = normalize_severity(parts[1])
+                message = ": ".join(parts[2:]).strip()
             else:
                 timeStampStr = parts[0]
                 severity = "INFO"
@@ -241,14 +240,13 @@ def indexLogs():
     logs = loadLogs()
     if not logs:
         raise HTTPException(status_code=400, detail="No logs To Index")
-    templates = [mask_identifiers(log.message) for log in logs]
-    unique_templates = list(set(templates))
-    vectors = get_embeddings_batch(unique_templates)
-    vec_map = dict(zip(unique_templates, vectors))
+    messages = [log.message for log in logs]
+    vectors = get_embeddings_batch(messages)
 
     actions = []
-    for log, template in zip(logs, templates):
-        log.message_vector = vec_map[template]
+    for log, vec in zip(logs, vectors):
+        log.message_vector = vec
+        template = mask_identifiers(log.message)
         src = log.model_dump(mode="json")
         src["template"] = template
         doc_id = compute_log_id(log.service, src["timeStamp"], log.message)
@@ -296,9 +294,9 @@ def searchLogs(
     if q and q != "":
         mustClauses.append({"match": {"message": q}})
     if service and service != "":
-        filterClauses.append({"term": {"service": service}})
+        filterClauses.append({"term": {"service": {"value": service, "case_insensitive": True}}})
     if severity and severity != "":
-        filterClauses.append({"term": {"severity": severity.upper()}})
+        filterClauses.append({"term": {"severity": normalize_severity(severity)}})
     if dateFrom and dateFrom != "":
         timeRange["gte"] = dateFrom
     if dateTo and dateTo != "":
@@ -344,9 +342,9 @@ def hybridSearchLogs(
     filterClauses = []
     timeRange = {}
     if service and service != "":
-        filterClauses.append({"term": {"service": service}})
+        filterClauses.append({"term": {"service": {"value": service, "case_insensitive": True}}})
     if severity and severity != "":
-        filterClauses.append({"term": {"severity": severity.upper()}})
+        filterClauses.append({"term": {"severity": normalize_severity(severity)}})
     if dateFrom and dateFrom != "":
         timeRange["gte"] = dateFrom
     if dateTo and dateTo != "":
@@ -355,26 +353,34 @@ def hybridSearchLogs(
         filterClauses.append({"range": {"timeStamp": timeRange}})
 
     if isExactIdentifierQuery(q_clean):
-        bm25Body = {
-            "size": k,
-            "_source": {"excludes": ["message_vector"]},
-            "query": {
-                "bool": {
-                    "must": [{"match_phrase": {"message": q_clean}}],
-                    "filter": filterClauses,
-                }
-            },
-        }
-        try:
-            response = client.search(
-                index=SYSTEM_LOGS_INDEX,
-                body=bm25Body,
-            )
-            return response["hits"]["hits"]
-        except OpenSearchException as e:
-            raise HTTPException(status_code=500, detail=str(e))
+        match = IDENTIFIER_REGEX.search(q_clean)
+        if match:
+            id_match = match.group(0)
+            rest_text = IDENTIFIER_REGEX.sub("", q_clean).strip()
+            must_clauses = [{"match_phrase": {"message": id_match}}]
+            if rest_text:
+                must_clauses.append({"match": {"message": rest_text}})
+                
+            bm25Body = {
+                "size": k,
+                "_source": {"excludes": ["message_vector"]},
+                "query": {
+                    "bool": {
+                        "must": must_clauses,
+                        "filter": filterClauses,
+                    }
+                },
+            }
+            try:
+                response = client.search(
+                    index=SYSTEM_LOGS_INDEX,
+                    body=bm25Body,
+                )
+                return response["hits"]["hits"]
+            except OpenSearchException as e:
+                raise HTTPException(status_code=500, detail=str(e))
 
-    queryVector = get_embedding(mask_identifiers(q_clean))
+    queryVector = get_embedding(q_clean)
     keywordQuery = {
         "bool": {
             "must": [{"match": {"message": q_clean}}],
